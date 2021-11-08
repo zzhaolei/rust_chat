@@ -16,14 +16,16 @@ type SenderMessage = Sender<Message>;
 // 主要记录当前用户ID
 struct User {
     user_id: u128,
+    username: String,
     socket: TcpStream,
 }
 
 impl User {
-    fn new(socket: TcpStream) -> User {
+    fn new(username: String, socket: TcpStream) -> User {
         User {
             user_id: User::gen_user_id(),
             socket,
+            username,
         }
     }
 
@@ -107,7 +109,7 @@ fn transfer_message(
                 if user.user_id == id {
                     return true;
                 }
-                let mut buf = message.clone().into_bytes();
+                let mut buf = format!("{}: {}", user.username, message.clone()).into_bytes();
                 buf.resize(MESSAGE_SIZE, 0);
 
                 // 这一步可以过滤掉发送消息失败的socket，
@@ -121,6 +123,41 @@ fn transfer_message(
     (users, receiver)
 }
 
+fn get_username(mut socket: &mut TcpStream, address: &SocketAddr) -> String {
+    socket = socket
+        .write_all("用户名：".as_bytes())
+        .map(|_| socket)
+        .unwrap();
+
+    loop {
+        // 消息缓冲大小
+        let mut buf = vec![0; MESSAGE_SIZE];
+        match socket.read_exact(&mut buf) {
+            Ok(_) => {
+                // 将无意义的0去除，并将消息转为string
+                match String::from_utf8(buf.into_iter().take_while(|&x| x != 0).collect::<Vec<_>>())
+                {
+                    Ok(username) => {
+                        println!("Welcome {}@{}", username, address);
+                        break username;
+                    }
+                    Err(_) => {
+                        println!("不支持的utf8消息，无法转发");
+                        continue;
+                    }
+                };
+            }
+            Err(ref err) if err.kind() == ErrorKind::WouldBlock => {}
+            Err(_) => {
+                // 一切超出预期的异常，都被视为客户端终止链接。
+                println!("客户端 {} 离线！", address);
+                break "".to_string(); // 此时线程结束
+            }
+        }
+        sleep();
+    }
+}
+
 fn main() -> std::io::Result<()> {
     let listener = TcpListener::bind(LISTEN_ADDRESS)?;
     listener.set_nonblocking(true)?;
@@ -132,7 +169,7 @@ fn main() -> std::io::Result<()> {
     let (sender, mut receiver) = mpsc::channel::<Message>();
 
     loop {
-        if let Ok((socket, address)) = listener.accept() {
+        if let Ok((mut socket, address)) = listener.accept() {
             let socket_clone = match socket.try_clone() {
                 Ok(socket) => socket,
                 Err(_) => {
@@ -141,8 +178,14 @@ fn main() -> std::io::Result<()> {
                 }
             };
 
+            let username = get_username(&mut socket, &address);
+            if username.is_empty() {
+                println!("未获取到链接{}的用户名！", address);
+                continue;
+            }
+
             // 生成一个用户，包含一些关键信息
-            let user = User::new(socket_clone);
+            let user = User::new(username, socket_clone);
             let user_id = user.user_id;
             users.push(user);
 
@@ -155,6 +198,6 @@ fn main() -> std::io::Result<()> {
         users = result.0;
         receiver = result.1;
 
-        // sleep();
+        sleep();
     }
 }
